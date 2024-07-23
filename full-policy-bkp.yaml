@@ -1,0 +1,124 @@
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: poor-man-drs
+  namespace: openshift-cnv
+  annotations:
+    policy.open-cluster-management.io/description: Policy to create VirtMigration Objects for OCP-V VM's on overloaded nodes.
+spec:
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: drs-policy-obtain-node-values
+        spec:
+          object-templates-raw: >
+            {{- $memory_usage_percentage := 50 }}
+            {{- $cpu_usage_percentage := 50 }}
+            {{- $under_pressure_nodes := list "" }}
+            {{- $nodes := (lookup "v1" "Node" "" "" "node-role.kubernetes.io/worker").items }}
+
+            {{- range $node:= $nodes}}
+              {{/* ## TODO: Logic to normalize measurement between Ki,Mi,Gi, assumption for now is usage and allocatable are same units ## */}}
+              {{/* ## OCPBUG-https://issues.redhat.com/browse/OCPBUGS-25164 ## */}}
+              
+              
+              {{- $node_name := $node.metadata.name }}
+              {{- $allocatable_cpu := $node.status.allocatable.cpu }}
+              {{- $cpu_usage := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name).usage.cpu }}
+              {{- $cpu_test2 :=  mul ( trunc (sub (len $allocatable_cpu ) 1 | toInt ) $allocatable_cpu ) $cpu_usage_percentage }}
+              {{- $cpu_test3 :=  mul ( trunc (sub (len $cpu_usage) 1 | toInt ) $cpu_usage) 100 }}
+              {{- $cpu_pressure := gt $cpu_test3 $cpu_test2}}
+
+
+              {{- $allocatable_memory := $node.status.allocatable.memory }}
+              {{- $memory_usage := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name).usage.memory }}
+              {{- $mem_test2 :=  mul ( trunc (sub (len $allocatable_memory ) 2 | toInt ) $allocatable_memory ) $memory_usage_percentage }}
+              {{- $mem_test3 :=  mul ( trunc (sub (len $memory_usage) 2 | toInt ) $memory_usage) 100 }}
+              {{- $memory_pressure := gt $mem_test3 $mem_test2 }}
+
+              {{/* ## Node is not under pressure and should be removed from the under pressure list ## */}}
+              {{- if and (eq $cpu_pressure false) (eq $memory_pressure false) }}
+                {{- $temp_nodes := list "" }}                
+                {{- range $up_node:= $under_pressure_nodes }}
+                  {{- if eq $up_node $node_name }}
+                    {{- continue }}
+                  {{- else }}
+                    {{- $temp_nodes = append $temp_nodes $node_name }}
+                  {{- end }}
+                {{- end }}
+                {{- $under_pressure_nodes = $temp_nodes }}
+              {{- end }}
+
+              {{/* ## If condition met then node is under pressure ## */}}
+              {{- if or (eq $cpu_pressure true) (eq $memory_pressure true) }}
+                {{- $under_pressure_nodes := append $under_pressure_nodes $node_name }}
+              {{- end }}
+
+                - complianceType: musthave
+                  objectDefinition:
+                    kind: ConfigMap
+                    apiVersion: v1
+                    metadata:
+                      name: drs-{{ $node.metadata.name }}-info
+                      namespace: openshift-cnv
+                    data:
+                      info: |
+                        node: {{ $node.metadata.name }}
+                        cpu_allocatable: {{ $allocatable_cpu }}
+                        cpu_usage: {{ $cpu_usage }}
+                        cpu_pressure: {{ $cpu_pressure }}
+                        memory_allocatable: {{ $allocatable_memory }}
+                        memory_usage: {{ $memory_usage }}
+                        memory_pressure: {{ $memory_pressure }}
+            {{- end }}
+            - complianceType: musthave
+              objectDefinition:
+                kind: ConfigMap
+                apiVersion: v1
+                metadata:
+                  name: drs-under-pressure-nodes
+                  namespace: openshift-cnv
+                data:
+                  nodes: |
+                    {{- range $up_node:= $under_pressure_nodes }}
+                      {{- if ne $up_node "" }}
+                        - {{ $up_node }}
+                      {{- end }}
+                    {{- end }}
+
+          remediationAction: enforce
+          severity: high
+          pruneObjectBehavior: DeleteIfCreated
+  remediationAction: enforce
+  pruneObjectBehavior: DeleteIfCreated
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: poor-man-drs-placement
+  namespace: openshift-cnv
+spec:
+  clusterSets:
+    - main
+  tolerations:
+    - key: cluster.open-cluster-management.io/unreachable
+      operator: Exists
+    - key: cluster.open-cluster-management.io/unavailable
+      operator: Exists
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: poor-man-drs-placement-binding
+  namespace: openshift-cnv
+placementRef:
+  name: poor-man-drs-placement
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: poor-man-drs
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy

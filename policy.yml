@@ -1,0 +1,37 @@
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: ConfigurationPolicy
+metadata:
+  name: poor-mans-drs
+spec:
+  remediationAction: enforce
+  severity: high
+  object-templates-raw: |
+    {{- $cpu_percentage := "0.80" }}
+    {{- $memory_percentage := "0.80" }}
+
+    {{- $nodes := (lookup "v1" "Node" "" "").items }}
+    {{- range $node:= $nodes}}
+      {{- $allocatable_cpu := $node.status.allocatable.cpu }}
+      {{- $allocatable_memory := $node.status.allocatable.memory }}
+      {{- $node_name := $node.metadata.name }}
+      {{- $node_metrics := (lookup "v1" "Node" "" $node_name).metrics }}
+      {{- $cpu_usage := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name).usage.cpu }}
+      {{- $memory_usage := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name).usage.memory }}
+        - complianceType: musthave
+          objectDefinition:
+            kind: ConfigMap
+            apiVersion: v1
+            metadata:
+              name: {{ $node.metadata.name }}-info
+              namespace: default
+            data:
+              info: |
+                Node: {{ $node.metadata.name }}
+                CPU Usage: {{ $cpu_usage }}
+                Memory Usage: {{ $memory_usage }}
+                CPU Allocatable: {{ $allocatable_cpu }}
+                Memory Allocatable: {{ $allocatable_memory }}
+                CPU Threshold: {{ $cpu_percentage }}
+                Memory Threshold: {{ $memory_percentage }}
+    {{- end }}
