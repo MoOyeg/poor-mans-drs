@@ -15,9 +15,9 @@ spec:
           name: drs-policy-obtain-node-values
         spec:
           object-templates-raw: >
-            {{- $memory_usage_percentage := 50 }}
-            {{- $cpu_usage_percentage := 50 }}
-            {{- $nodes := (lookup "v1" "Node" "" "" "node-role.kubernetes.io/worker").items }}
+            {{- $memory_usage_percentage := 50 }} {{- $cpu_usage_percentage :=
+            50 }} {{- $nodes := (lookup "v1" "Node" "" ""
+            "node-role.kubernetes.io/worker").items }}
 
             {{- range $node:= $nodes}}
               {{/* ## TODO: Logic to normalize measurement between Ki,Mi,Gi, assumption for now is usage and allocatable are same units ## */}}
@@ -56,10 +56,9 @@ spec:
                       memory_usage: '{{ $memory_usage }}'
                       memory_pressure: '{{ $memory_pressure }}'
             {{- end }}
+          pruneObjectBehavior: DeleteIfCreated
           remediationAction: enforce
           severity: high
-          pruneObjectBehavior: DeleteIfCreated
-
     - objectDefinition:
         apiVersion: policy.open-cluster-management.io/v1
         kind: ConfigurationPolicy
@@ -69,33 +68,58 @@ spec:
           object-templates-raw: >
             {{- $drs_values := dict "" "" }}
 
-            {{- $nodes := (lookup "v1" "ConfigMap" "openshift-cnv" "" "drs_info_file").items }}
+            {{- $virtualmachines := (lookup "kubevirt.io/v1" "VirtualMachineInstance" "" "" ).items }} 
 
-            {{- $virtualmachines := (lookup "kubevirt.io/v1" "VirtualMachineInstance" "" "" ).items }}
+            {{- range $vm:= $virtualmachines }}
+              {{- $vm_name := $vm.metadata.name }}
+              {{- $vm_node := $vm.status.nodeName }}
+              {{- $configmapname := (cat "drs" $vm_node "info" | replace " " "-" ) }}
+              {{- $vm_namespace := $vm.metadata.namespace }}
+              {{- $vm_memory_pressure := (lookup "v1" "ConfigMap" "openshift-cnv" $configmapname "drs_info_file").data.memory_pressure | toBool }}
+              {{- $vm_cpu_pressure := (lookup "v1" "ConfigMap" "openshift-cnv" $configmapname "drs_info_file").data.cpu_pressure | toBool }}
+              {{- $acm_requested_reason := "" }}
+              {{- $create_acm_vmim := true }}     
 
-            {{- range $node:= $nodes }}
-              {{- $node_name := $node.data.node }}
-              {{- $drs_values := set $drs_values (cat $node_name "cpu_pressure" | replace " " "_") $node.data.cpu_pressure }}
-              {{- $drs_values := set $drs_values (cat $node_name "memory_pressure" | replace " " "_" ) $node.data.memory_pressure }}
+              {{- if or $vm_memory_pressure $vm_cpu_pressure }}
+
+                  {{- if $vm_memory_pressure }}
+                    {{- $acm_requested_reason = "memory_pressure" }}
+                  {{- else }}
+                    {{- $acm_requested_reason = "cpu_pressure" }}
+                  {{- end }}
+
+                  {{ $acm_vmi_migrations := (lookup "kubevirt.io/v1" "VirtualMachineInstanceMigration" $vm_namespace "" "acm_requested_migration").items }}
+                  {{- range $vmim:= $acm_vmi_migrations }}
+                    {{- if eq $vmim.metadata.labels.acm_vm_name $vm_name }}
+                      {{- if or (eq $vmim.status.phase "Failed") (eq $vmim.status.phase "Succeeded")}}
+                        {{- break }}
+                      {{- else }}s
+                        {{- $create_acm_vmim = false }}
+                      {{- end }}
+                    {{- end }}
+                  {{- end }}
+
+                  {{- if $create_acm_vmim }}
+                    - complianceType: musthave
+                      objectDefinition:
+                        kind: VirtualMachineInstanceMigration
+                        apiVersion: kubevirt.io/v1
+                        metadata:
+                            name: {{ $vm_name }}-{{ now.Unix }}-migration
+                            namespace: {{ $vm_namespace }}
+                            labels:
+                              acm_requested_migration: "true"
+                              acm_source_node: '{{ $vm_node }}'
+                              acm_vm_name: '{{ $vm_name }}'
+                              acm_migration_reason: '{{ $acm_requested_reason }}'
+                        spec:
+                            vmiName: {{ $vm_name }}
+                    {{- end }}
+              {{- end }}
             {{- end }}
-
-            - complianceType: musthave
-              objectDefinition:
-                kind: ConfigMap
-                apiVersion: v1
-                metadata:
-                  name: drs-testinfo
-                  namespace: openshift-cnv
-                data:
-                  pressure: |
-                    '{{- get $drs_values "ocp4-worker3.aio.example.com_cpu_pressure" }}'
-                  memory: |
-                    '{{- get $drs_values "ocp4-worker3.aio.example.com_memory_pressure" }}'
           remediationAction: enforce
           severity: high
-          pruneObjectBehavior: DeleteIfCreated
   remediationAction: enforce
-  pruneObjectBehavior: DeleteIfCreated
 ---
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
