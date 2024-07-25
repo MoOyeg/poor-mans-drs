@@ -1,34 +1,46 @@
 kind: Deployment
 apiVersion: apps/v1
 metadata:
-  name: test1-load-vm
+  name: test1-stress-vm
   namespace: drs-test1
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: test1-load-vm
+      app: test1-stress-vm
   template:
     metadata:
       creationTimestamp: null
       labels:
-        app: test1-load-vm
+        app: test1-stress-vm
     spec:
+      volumes:
+        - name: stress-volume
+          emptyDir:
+            sizeLimit: 500Mi
       containers:
         - resources: {}
           terminationMessagePath: /dev/termination-log
           name: container
           command:
-            - stress-ng --matrix 0 -t 0
+            - /bin/bash
           ports:
             - containerPort: 8080
               protocol: TCP
           imagePullPolicy: Always
           terminationMessagePolicy: File
-          image: quay.io/container-perf-tools/stress-ng
+          image: quay.io/container-perf-tools/stress-ng:1.2
+          volumeMounts:
+            - name: stress-volume
+              mountPath: /stress
           args:
             - '-c'
-            - 'while :;do sleep infinity;done'
+            - cd /stress && stress-ng --matrix 0 -t 0
+  serviceAccount: default
+  volumes:
+    - name: stress-volume
+      emptyDir:
+        sizeLimit: 500Mi
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
       dnsPolicy: ClusterFirst

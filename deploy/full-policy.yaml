@@ -68,7 +68,7 @@ spec:
           object-templates-raw: >
             {{- $drs_values := dict "" "" }}
 
-            {{- $virtualmachines := (lookup "kubevirt.io/v1" "VirtualMachineInstance" "" "" ).items }} 
+            {{- $virtualmachines := (lookup "kubevirt.io/v1" "VirtualMachineInstance" "" "" "!acm-drs/exclude" ).items }} 
 
             {{- range $vm:= $virtualmachines }}
               {{- $vm_name := $vm.metadata.name }}
