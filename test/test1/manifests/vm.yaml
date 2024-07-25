@@ -1,7 +1,8 @@
-apiVersion: kubevirt.io/v1alpha3
+apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: drs-test1-vm
+  namespace: drs-test1
 spec:
   running: true
   template:
