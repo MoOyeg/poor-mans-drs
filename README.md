@@ -29,4 +29,6 @@ How does it do this:
     ```bash
     oc apply -k ./deploy
     ```
+
+    - In the ACM UI , under infrastructure, clustersets,drs clusterset - add the clusters that should be inside the drs clusterset 
     

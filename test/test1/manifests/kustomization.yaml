@@ -1,0 +1,4 @@
+resources:
+- project.yaml
+- vm.yaml
+- test-deployment.yaml
