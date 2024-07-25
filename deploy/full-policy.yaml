@@ -14,49 +14,51 @@ spec:
         metadata:
           name: drs-policy-obtain-node-values
         spec:
-          object-templates-raw: >
-            {{- $memory_usage_percentage := 50 }} {{- $cpu_usage_percentage :=
-            50 }} {{- $nodes := (lookup "v1" "Node" "" ""
-            "node-role.kubernetes.io/worker").items }}
+          object-templates-raw: |
+            {{- $memory_usage_percentage := 50 }} 
+            {{- $cpu_usage_percentage := 50 }}
+            {{- $nodes := (lookup "v1" "Node" "" "" "node-role.kubernetes.io/worker").items }}
 
-            {{- range $node:= $nodes}}
+            {{- range $node := $nodes}}
               {{/* ## TODO: Logic to normalize measurement between Ki,Mi,Gi, assumption for now is usage and allocatable are same units ## */}}
               {{/* ## OCPBUG-https://issues.redhat.com/browse/OCPBUGS-25164 ## */}}
               
               
               {{- $node_name := $node.metadata.name }}
+              {{- $node_metrics := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name) }}
+
               {{- $allocatable_cpu := $node.status.allocatable.cpu }}
-              {{- $cpu_usage := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name).usage.cpu }}
+              {{- $cpu_usage := $node_metrics.usage.cpu }}
               {{- $cpu_test2 :=  mul ( trunc (sub (len $allocatable_cpu ) 1 | toInt ) $allocatable_cpu ) $cpu_usage_percentage }}
               {{- $cpu_test3 :=  mul ( trunc (sub (len $cpu_usage) 1 | toInt ) $cpu_usage) 100 }}
               {{- $cpu_pressure := gt $cpu_test3 $cpu_test2}}
 
 
               {{- $allocatable_memory := $node.status.allocatable.memory }}
-              {{- $memory_usage := (lookup "metrics.k8s.io/v1beta1" "NodeMetrics" "" $node_name).usage.memory }}
+              {{- $memory_usage := $node_metrics.usage.memory }}
               {{- $mem_test2 :=  mul ( trunc (sub (len $allocatable_memory ) 2 | toInt ) $allocatable_memory ) $memory_usage_percentage }}
               {{- $mem_test3 :=  mul ( trunc (sub (len $memory_usage) 2 | toInt ) $memory_usage) 100 }}
               {{- $memory_pressure := gt $mem_test3 $mem_test2 }}
 
+              {{- $nodeHasPressure := "none" }}
+              {{- if or $cpu_pressure $memory_pressure }}
+                {{- $nodeHasPressure = (printf "%s,%s" ($memory_pressure | ternary "memory_pressure" "") ($cpu_pressure | ternary "cpu_pressure" "")) }}
+              {{- end }}
+
                 - complianceType: musthave
                   objectDefinition:
-                    kind: ConfigMap
+                    kind: Node
                     apiVersion: v1
                     metadata:
-                      name: drs-{{ $node.metadata.name }}-info
-                      namespace: openshift-cnv
+                      name: {{ $node_name }}
                       labels:
-                        drs_info_file: "true"
-                    data:
-                      node: '{{ $node.metadata.name }}'
-                      cpu_allocatable: '{{ $allocatable_cpu }}'
-                      cpu_usage: '{{ $cpu_usage }}'
-                      cpu_pressure: '{{ $cpu_pressure }}'
-                      memory_allocatable: '{{ $allocatable_memory }}'
-                      memory_usage: '{{ $memory_usage }}'
-                      memory_pressure: '{{ $memory_pressure }}'
+                        acm.drs/node-pressure: '{{ $nodeHasPressure | trimAll "," }}'
+              {{- if ne ($nodeHasPressure | trimAll ",") (dig "acm.drs/node-pressure" "" $node.metadata.labels) }}
+                      annotations:
+                        acm.drs/node-pressure-since: '{{ now | date "2006-01-02T15:04:05+00:00" }}'
+              {{- end }}
             {{- end }}
-          pruneObjectBehavior: DeleteIfCreated
+          pruneObjectBehavior: None
           remediationAction: enforce
           severity: high
     - objectDefinition:
@@ -65,56 +67,45 @@ spec:
         metadata:
           name: drs-policy-rebalance-vms
         spec:
-          object-templates-raw: >
-            {{- $drs_values := dict "" "" }}
+          object-templates-raw: |
+            {{/* ## Get all nodes that are currently under pressure ## */}}
+            {{- $nodes := (lookup "v1" "Node" "" "" "acm.drs/node-pressure!=none").items }}
 
-            {{- $virtualmachines := (lookup "kubevirt.io/v1" "VirtualMachineInstance" "" "" "!acm-drs/exclude" ).items }} 
+            {{- range $node := $nodes}}
+              {{/* ## Get all virtual machines that are running on the node ## */}}
+              {{- $virtualmachines := (lookup "kubevirt.io/v1" "VirtualMachineInstance" "" "" "!acm-drs/exclude" 
+                                                                (printf "kubevirt.io/nodeName=%s" $node.metadata.name)
+                                      ).items }}
 
-            {{- range $vm:= $virtualmachines }}
-              {{- $vm_name := $vm.metadata.name }}
-              {{- $vm_node := $vm.status.nodeName }}
-              {{- $configmapname := (cat "drs" $vm_node "info" | replace " " "-" ) }}
-              {{- $vm_namespace := $vm.metadata.namespace }}
-              {{- $vm_memory_pressure := (lookup "v1" "ConfigMap" "openshift-cnv" $configmapname "drs_info_file").data.memory_pressure | toBool }}
-              {{- $vm_cpu_pressure := (lookup "v1" "ConfigMap" "openshift-cnv" $configmapname "drs_info_file").data.cpu_pressure | toBool }}
-              {{- $acm_requested_reason := "" }}
-              {{- $create_acm_vmim := true }}     
+              {{- range $vm := $virtualmachines }}
+                {{- $vm_name := $vm.metadata.name }}
+                {{- $create_acm_vmim := true }}
 
-              {{- if or $vm_memory_pressure $vm_cpu_pressure }}
+                {{/* ## Check if there is an existing  VMIMigration CR for the VM ## */}}
+                {{ $acm_vmi_migrations := (lookup "kubevirt.io/v1" "VirtualMachineInstanceMigration" $vm.metadata.namespace  "" (printf "kubevirt.io/vmi-name=%s" $vm_name)).items }}
 
-                  {{- if $vm_memory_pressure }}
-                    {{- $acm_requested_reason = "memory_pressure" }}
-                  {{- else }}
-                    {{- $acm_requested_reason = "cpu_pressure" }}
+                {{- range $vmim := $acm_vmi_migrations }}
+                  {{- if not (has $vmim.status.phase (list "Failed" "Succeeded")) }}
+                    {{- $create_acm_vmim = false }}
                   {{- end }}
+                {{- end }}
 
-                  {{ $acm_vmi_migrations := (lookup "kubevirt.io/v1" "VirtualMachineInstanceMigration" $vm_namespace "" "acm_requested_migration").items }}
-                  {{- range $vmim:= $acm_vmi_migrations }}
-                    {{- if eq $vmim.metadata.labels.acm_vm_name $vm_name }}
-                      {{- if or (eq $vmim.status.phase "Failed") (eq $vmim.status.phase "Succeeded")}}
-                        {{- break }}
-                      {{- else }}s
-                        {{- $create_acm_vmim = false }}
-                      {{- end }}
-                    {{- end }}
-                  {{- end }}
-
-                  {{- if $create_acm_vmim }}
+                {{- if $create_acm_vmim }}
                     - complianceType: musthave
                       objectDefinition:
                         kind: VirtualMachineInstanceMigration
                         apiVersion: kubevirt.io/v1
                         metadata:
                             name: {{ $vm_name }}-{{ now.Unix }}-migration
-                            namespace: {{ $vm_namespace }}
+                            namespace: {{ $vm.metadata.namespace }}
                             labels:
                               acm_requested_migration: "true"
                               acm_source_node: '{{ $vm_node }}'
-                              acm_vm_name: '{{ $vm_name }}'
-                              acm_migration_reason: '{{ $acm_requested_reason }}'
+                              acm_vm_name: '{{ $vm.status.nodeName }}'
+                              acm_migration_reason: '{{ (dig "acm.drs/node-pressure" "" $node.metadata.labels)  }}'
                         spec:
                             vmiName: {{ $vm_name }}
-                    {{- end }}
+                {{- end }}
               {{- end }}
             {{- end }}
           remediationAction: enforce
