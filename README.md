@@ -32,8 +32,9 @@ How does it do this:
 
 - To exclude a VM from being managed by this policy label the VM with "acm-drs/exclude"
 
+- ACM ManagedClusterSetBinding selects the global clusterset to make it easier to test.
 
-- In the ACM UI , under infrastructure, clustersets,drs clusterset - add the clusters that should be inside the drs clusterset.
+- Change the Policy Evaluation Interval to control response times.
 
 - You can run one of the below test scenarios  
 

@@ -1,4 +1,4 @@
 resources:
-- managedclusterset.yml
+# - managedclusterset.yml
 - managedclustersetbinding.yaml
 - full-policy.yaml
